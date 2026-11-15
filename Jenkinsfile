@@ -1,36 +1,145 @@
+
 pipeline {
     agent any
-    options { timestamps(); disableConcurrentBuilds() }
-    environment { IMAGE_NAME = 'cloud-deployment-lab' }
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        skipDefaultCheckout(false)
+    }
+
+    parameters {
+        booleanParam(
+            name: 'DEPLOY_AWS',
+            defaultValue: false,
+            description: 'Deploy application to AWS ECS'
+        )
+
+        string(
+            name: 'AWS_REGION',
+            defaultValue: 'ap-southeast-2',
+            description: 'AWS deployment region'
+        )
+
+        string(
+            name: 'AWS_ACCOUNT_ID',
+            defaultValue: '',
+            description: 'AWS account ID'
+        )
+    }
+
+    environment {
+        IMAGE_NAME = 'cloud-deployment-lab'
+    }
+
     stages {
+
         stage('Verify Tools') {
-            steps { bat 'python --version && docker --version' }
+            steps {
+                bat '''
+                    @echo off
+
+                    python --version
+                    if errorlevel 1 exit /b 1
+
+                    docker --version
+                    if errorlevel 1 exit /b 1
+
+                    aws --version
+                    if errorlevel 1 exit /b 1
+
+                    echo All required tools are available.
+                '''
+            }
         }
+
+        stage('Verify AWS Authentication') {
+            steps {
+                withEnv([
+                    'AWS_PROFILE=cloud-lab',
+                    'AWS_DEFAULT_REGION=ap-southeast-2'
+                ]) {
+                    bat '''
+                        @echo off
+
+                        echo Checking AWS authentication...
+
+                        aws sts get-caller-identity --query Arn --output text
+                        if errorlevel 1 exit /b 1
+
+                        echo Checking ECR repository access...
+
+                        aws ecr describe-repositories --repository-names cloud-deployment-lab --region ap-southeast-2 --query "repositories[0].repositoryName" --output text
+                        if errorlevel 1 exit /b 1
+
+                        echo AWS authentication and ECR access verified.
+                    '''
+                }
+            }
+        }
+
         stage('Install & Test') {
-            steps { bat 'python -m pip install -r requirements-dev.txt && python -m pytest -q' }
+            steps {
+                bat '''
+                    @echo off
+
+                    python -m pip install -r requirements-dev.txt
+                    if errorlevel 1 exit /b 1
+
+                    python -m pytest -q
+                    if errorlevel 1 exit /b 1
+                '''
+            }
         }
+
         stage('Build Docker Image') {
-            steps { bat 'docker build -t %IMAGE_NAME%:%BUILD_NUMBER% -t %IMAGE_NAME%:latest .' }
+            steps {
+                bat '''
+                    @echo off
+
+                    docker build -t %IMAGE_NAME%:%BUILD_NUMBER% -t %IMAGE_NAME%:latest .
+                    if errorlevel 1 exit /b 1
+                '''
+            }
         }
+
         stage('Container Smoke Test') {
             steps {
-                bat 'docker run --rm %IMAGE_NAME%:latest python -c "from app.main import app; assert app.test_client().get(\'/health\').status_code == 200"'
-            }
-        }
-        stage('Push to ECR & Deploy') {
-            when { expression { return env.DEPLOY_AWS == 'true' } }
-            steps {
                 bat '''@echo off
-if "%AWS_REGION%"=="" exit /b 1
-if "%AWS_ACCOUNT_ID%"=="" exit /b 1
-aws ecr get-login-password --region %AWS_REGION% | docker login --username AWS --password-stdin %AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com
+docker run --rm %IMAGE_NAME%:latest python -c "from app.main import app; assert app.test_client().get('/health').status_code == 200"
 if errorlevel 1 exit /b 1
-docker tag %IMAGE_NAME%:latest %AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com/%IMAGE_NAME%:latest
-docker push %AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com/%IMAGE_NAME%:latest
-if errorlevel 1 exit /b 1
-aws ecs update-service --cluster cloud-lab --service cloud-lab-service --force-new-deployment --region %AWS_REGION%
 '''
             }
+        }
+
+        stage('Push to ECR & Deploy') {
+            when {
+                expression {
+                    return params.DEPLOY_AWS
+                }
+            }
+
+            steps {
+                error(
+                    'AWS deployment is not configured yet. ' +
+                    'Restricted AWS credentials and ECR authentication ' +
+                    'must be configured before enabling deployment.'
+                )
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully.'
+        }
+
+        failure {
+            echo 'Pipeline failed. Check the console output.'
+        }
+
+        always {
+            echo 'Build finished.'
         }
     }
 }
