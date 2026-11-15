@@ -5,26 +5,19 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
-        skipDefaultCheckout(false)
     }
 
     parameters {
         booleanParam(
             name: 'DEPLOY_AWS',
             defaultValue: false,
-            description: 'Deploy application to AWS ECS'
+            description: 'Push to AWS ECR and deploy to ECS'
         )
 
         string(
             name: 'AWS_REGION',
             defaultValue: 'ap-southeast-2',
-            description: 'AWS deployment region'
-        )
-
-        string(
-            name: 'AWS_ACCOUNT_ID',
-            defaultValue: '',
-            description: 'AWS account ID'
+            description: 'AWS region'
         )
     }
 
@@ -48,31 +41,31 @@ pipeline {
                     aws --version
                     if errorlevel 1 exit /b 1
 
-                    echo All required tools are available.
+                    echo All required tools available.
                 '''
             }
         }
 
         stage('Verify AWS Authentication') {
+            when {
+                expression { return params.DEPLOY_AWS }
+            }
+
             steps {
                 withEnv([
-                    'AWS_PROFILE=cloud-lab',
+                    'AWS_PROFILE=cloud-lab-deploy',
                     'AWS_DEFAULT_REGION=ap-southeast-2'
                 ]) {
                     bat '''
                         @echo off
 
-                        echo Checking AWS authentication...
-
                         aws sts get-caller-identity --query Arn --output text
                         if errorlevel 1 exit /b 1
-
-                        echo Checking ECR repository access...
 
                         aws ecr describe-repositories --repository-names cloud-deployment-lab --region ap-southeast-2 --query "repositories[0].repositoryName" --output text
                         if errorlevel 1 exit /b 1
 
-                        echo AWS authentication and ECR access verified.
+                        echo AWS deployment identity verified.
                     '''
                 }
             }
@@ -114,32 +107,35 @@ if errorlevel 1 exit /b 1
 
         stage('Push to ECR & Deploy') {
             when {
-                expression {
-                    return params.DEPLOY_AWS
-                }
+                expression { return params.DEPLOY_AWS }
             }
 
             steps {
-                error(
-                    'AWS deployment is not configured yet. ' +
-                    'Restricted AWS credentials and ECR authentication ' +
-                    'must be configured before enabling deployment.'
-                )
+                withEnv([
+                    'AWS_PROFILE=cloud-lab-deploy',
+                    'AWS_DEFAULT_REGION=ap-southeast-2'
+                ]) {
+                    bat '''
+                        @echo off
+                        powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "scripts\\deploy-aws.ps1"
+                        if errorlevel 1 exit /b 1
+                    '''
+                }
             }
         }
     }
 
     post {
         success {
-            echo 'Pipeline completed successfully.'
+            echo 'BUILD SUCCESSFUL.'
         }
 
         failure {
-            echo 'Pipeline failed. Check the console output.'
+            echo 'BUILD FAILED. Check console output.'
         }
 
         always {
-            echo 'Build finished.'
+            echo 'Pipeline finished.'
         }
     }
 }
